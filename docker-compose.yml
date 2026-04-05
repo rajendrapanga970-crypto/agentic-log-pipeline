@@ -1,0 +1,173 @@
+version: "3.9"
+
+networks:
+  pipeline_net:
+    driver: bridge
+
+volumes:
+  qdrant_storage:
+  nifi_conf:
+  nifi_logs:
+  ollama_models:
+  n8n_data:
+
+services:
+
+  # ─── LAYER 1: INFRASTRUCTURE ───────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    networks:
+      - pipeline_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── LAYER 2: DATA INGESTION — Apache NiFi ─────────────────────────────────
+  nifi:
+    image: apache/nifi:1.23.2
+    container_name: nifi
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+      - "8080:8080"
+    environment:
+      - NIFI_WEB_HTTP_PORT=8080
+      - NIFI_WEB_HTTPS_PORT=8443
+      - SINGLE_USER_CREDENTIALS_USERNAME=admin
+      - SINGLE_USER_CREDENTIALS_PASSWORD=admin12345678
+      - NIFI_SENSITIVE_PROPS_KEY=nifisecretkey12345
+    volumes:
+      - nifi_conf:/opt/nifi/nifi-current/conf
+      - nifi_logs:/opt/nifi/nifi-current/logs
+      - ./nifi/flow_template.json:/opt/nifi/nifi-current/conf/flow_template.json:ro
+    networks:
+      - pipeline_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/nifi-api/system-diagnostics"]
+      interval: 30s
+      timeout: 10s
+      retries: 15
+
+  # ─── LAYER 3: ORCHESTRATION — n8n ──────────────────────────────────────────
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=false
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://n8n:5678/
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=false
+      - DB_TYPE=sqlite
+      - DB_SQLITE_DATABASE=/home/node/.n8n/database.sqlite
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflow.json:/home/node/.n8n/workflow_import.json:ro
+    networks:
+      - pipeline_net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5678/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ─── LAYER 4: LLM — Ollama ─────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - pipeline_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ─── LAYER 5: AGENTS + RAG PIPELINE ────────────────────────────────────────
+  agents:
+    build:
+      context: ./agents
+      dockerfile: Dockerfile
+    container_name: agents
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - COLLECTION_NAME=logs_collection
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    networks:
+      - pipeline_net
+
+  # ─── LAYER 6: DASHBOARD — Streamlit ────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - AGENTS_HOST=agents
+      - AGENTS_PORT=8000
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - N8N_HOST=n8n
+      - N8N_PORT=5678
+    depends_on:
+      - agents
+    networks:
+      - pipeline_net
+
+  # ─── BOOTSTRAP: Auto-configure all services ────────────────────────────────
+  bootstrap:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile
+    container_name: bootstrap
+    restart: "no"
+    environment:
+      - QDRANT_HOST=qdrant
+      - NIFI_HOST=nifi
+      - N8N_HOST=n8n
+      - OLLAMA_HOST=ollama
+      - AGENTS_HOST=agents
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    networks:
+      - pipeline_net
+    volumes:
+      - ./n8n/workflow.json:/app/workflow.json:ro
+      - ./nifi/flow_template.json:/app/flow_template.json:ro

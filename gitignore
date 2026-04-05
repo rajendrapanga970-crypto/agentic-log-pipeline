@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+*.log
+*.tmp
+.DS_Store
+node_modules/
+dist/
+.venv/
+venv/
+*.egg-info/
+
+# added from clone

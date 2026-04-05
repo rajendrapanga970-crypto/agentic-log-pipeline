@@ -1,0 +1,170 @@
+{
+  "name": "Log Classification & Routing Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "log-event",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Log Event Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "log-event-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst classification = body.classification || 'unknown';\nconst level = body.level || 'INFO';\n\nlet route = 'summary';\nif (classification === 'malicious' || level === 'CRITICAL') {\n  route = 'threat';\n} else if (classification === 'deny' || level === 'ERROR') {\n  route = 'alert';\n} else {\n  route = 'summary';\n}\n\nreturn [{ json: { ...body, route, routed_at: new Date().toISOString() } }];"
+      },
+      "id": "router-code",
+      "name": "Classify & Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.route }}",
+              "value2": "threat"
+            }
+          ]
+        }
+      },
+      "id": "switch-threat",
+      "name": "Route: Threat?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.route }}",
+              "value2": "alert"
+            }
+          ]
+        }
+      },
+      "id": "switch-alert",
+      "name": "Route: Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://agents:8000/agent/threat",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "log_data", "value": "={{ JSON.stringify($json) }}"}
+          ]
+        },
+        "options": {}
+      },
+      "id": "threat-agent-call",
+      "name": "Threat Detection Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [900, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://agents:8000/agent/alert",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "log_data", "value": "={{ JSON.stringify($json) }}"}
+          ]
+        },
+        "options": {}
+      },
+      "id": "alert-agent-call",
+      "name": "Alert Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [900, 350]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://agents:8000/agent/summary",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "log_data", "value": "={{ JSON.stringify($json) }}"}
+          ]
+        },
+        "options": {}
+      },
+      "id": "summary-agent-call",
+      "name": "Summary Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [900, 560]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({status: 'routed', route: $json.route, timestamp: new Date().toISOString()}) }}"
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1120, 300]
+    }
+  ],
+  "connections": {
+    "Log Event Webhook": {
+      "main": [[{"node": "Classify & Route", "type": "main", "index": 0}]]
+    },
+    "Classify & Route": {
+      "main": [
+        [{"node": "Route: Threat?", "type": "main", "index": 0}],
+        [{"node": "Route: Alert?", "type": "main", "index": 0}]
+      ]
+    },
+    "Route: Threat?": {
+      "main": [
+        [{"node": "Threat Detection Agent", "type": "main", "index": 0}],
+        [{"node": "Route: Alert?", "type": "main", "index": 0}]
+      ]
+    },
+    "Route: Alert?": {
+      "main": [
+        [{"node": "Alert Agent", "type": "main", "index": 0}],
+        [{"node": "Summary Agent", "type": "main", "index": 0}]
+      ]
+    },
+    "Threat Detection Agent": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    },
+    "Alert Agent": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    },
+    "Summary Agent": {
+      "main": [[{"node": "Respond to Webhook", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "1",
+  "triggerCount": 1,
+  "active": true
+}
